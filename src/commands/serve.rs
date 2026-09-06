@@ -3,6 +3,7 @@ use clap::Parser;
 use http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode};
 use http_body_util::{BodyExt as _, Full};
 use hyper::server::conn::http1;
+use listenfd::ListenFd;
 use pin_project_lite::pin_project;
 use std::convert::Infallible;
 use std::ffi::OsString;
@@ -18,6 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::io::{self, AsyncWrite};
+use tokio::net::TcpListener;
 use tokio::sync::{Notify, Semaphore};
 use wasmtime::component::{Component, GuestTaskId, Linker};
 use wasmtime::error::Context as _;
@@ -352,7 +354,7 @@ impl ServeCommand {
 
     fn new_store(&self, engine: &Engine, instance_id: Option<u64>) -> Result<Store<Host>> {
         let mut builder = WasiCtxBuilder::new();
-        self.run.configure_wasip2(&mut builder)?;
+        self.run.configure_wasip2(true, &mut builder)?;
 
         if let Some(instance_id) = instance_id {
             builder.env("INSTANCE_ID", instance_id.to_string());
@@ -615,25 +617,38 @@ impl ServeCommand {
             });
         }
 
-        let socket = match &self.addr {
-            SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
-            SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6()?,
+        let listener = match self
+            .inherit_socket()
+            .context("Failed to resolve LISTEN_FDS")?
+        {
+            Some(listener) => {
+                eprintln!("Serving HTTP on inherited socket");
+                log::info!("Listening on inherited socket");
+
+                listener
+            }
+            None => {
+                let socket = match &self.addr {
+                    SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
+                    SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6()?,
+                };
+                // Conditionally enable `SO_REUSEADDR` depending on the current
+                // platform. On Unix we want this to be able to rebind an address in
+                // the `TIME_WAIT` state which can happen then a server is killed with
+                // active TCP connections and then restarted. On Windows though if
+                // `SO_REUSEADDR` is specified then it enables multiple applications to
+                // bind the port at the same time which is not something we want. Hence
+                // this is conditionally set based on the platform (and deviates from
+                // Tokio's default from always-on).
+                socket.set_reuseaddr(!cfg!(windows))?;
+                socket.bind(self.addr)?;
+                let listener = socket.listen(100)?;
+
+                eprintln!("Serving HTTP on http://{}/", listener.local_addr()?);
+                log::info!("Listening on {}", self.addr);
+                listener
+            }
         };
-        // Conditionally enable `SO_REUSEADDR` depending on the current
-        // platform. On Unix we want this to be able to rebind an address in
-        // the `TIME_WAIT` state which can happen then a server is killed with
-        // active TCP connections and then restarted. On Windows though if
-        // `SO_REUSEADDR` is specified then it enables multiple applications to
-        // bind the port at the same time which is not something we want. Hence
-        // this is conditionally set based on the platform (and deviates from
-        // Tokio's default from always-on).
-        socket.set_reuseaddr(!cfg!(windows))?;
-        socket.bind(self.addr)?;
-        let listener = socket.listen(100)?;
-
-        eprintln!("Serving HTTP on http://{}/", listener.local_addr()?);
-
-        log::info!("Listening on {}", self.addr);
 
         let epoch_interval = if let Some(Profile::Guest { interval, .. }) = self.run.profile {
             Some(interval)
@@ -752,6 +767,20 @@ impl ServeCommand {
         }
 
         Ok(())
+    }
+
+    fn inherit_socket(&self) -> Result<Option<TcpListener>> {
+        if !self.run.common.wasi.listenfd.unwrap_or_default() {
+            return Ok(None);
+        }
+
+        let mut listenfd = ListenFd::from_env();
+        let Some(listener) = listenfd.take_tcp_listener(0)? else {
+            return Ok(None);
+        };
+
+        listener.set_nonblocking(true)?;
+        Ok(Some(TcpListener::from_std(listener)?))
     }
 }
 
