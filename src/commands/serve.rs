@@ -3,7 +3,6 @@ use clap::Parser;
 use http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode};
 use http_body_util::{BodyExt as _, Full};
 use hyper::server::conn::http1;
-use listenfd::ListenFd;
 use pin_project_lite::pin_project;
 use std::convert::Infallible;
 use std::ffi::OsString;
@@ -122,6 +121,12 @@ pub struct ServeCommand {
     /// if unspecified, logs will be prefixed with 'stdout|stderr [{req_id}] :: '
     #[arg(long)]
     no_logging_prefix: bool,
+
+    /// Use sockets passed via the 'LISTEN_FDS' environment variable (set e.g. by systemd when
+    /// launching a service from socket units).
+    #[cfg(unix)]
+    #[arg(long)]
+    listenfd: bool,
 
     /// The WebAssembly component to run.
     #[arg(value_name = "WASM", required = true)]
@@ -354,7 +359,7 @@ impl ServeCommand {
 
     fn new_store(&self, engine: &Engine, instance_id: Option<u64>) -> Result<Store<Host>> {
         let mut builder = WasiCtxBuilder::new();
-        self.run.configure_wasip2(true, &mut builder)?;
+        self.run.configure_wasip2(&mut builder)?;
 
         if let Some(instance_id) = instance_id {
             builder.env("INSTANCE_ID", instance_id.to_string());
@@ -769,18 +774,38 @@ impl ServeCommand {
         Ok(())
     }
 
+    /// If the `--listenfd` option is enabled, attempts to find the first `AF_INET` socket passed to
+    /// this process via the [protocol used by systemd](https://www.freedesktop.org/software/systemd/man/latest/sd_listen_fds.html#Notes).
+    ///
+    /// This is most commonly used for systemd [socket activation units](https://www.freedesktop.org/software/systemd/man/latest/systemd.socket.html),
+    /// which makes systemd create a socket and launch wasmtime on the first connection to it. This
+    /// allows sandboxing the wasmtime process in e.g. a private network namespace.
+    #[cfg(unix)]
     fn inherit_socket(&self) -> Result<Option<TcpListener>> {
-        if !self.run.common.wasi.listenfd.unwrap_or_default() {
+        use listenfd::ListenFd;
+
+        if !self.listenfd {
             return Ok(None);
         }
 
         let mut listenfd = ListenFd::from_env();
-        let Some(listener) = listenfd.take_tcp_listener(0)? else {
-            return Ok(None);
-        };
 
-        listener.set_nonblocking(true)?;
-        Ok(Some(TcpListener::from_std(listener)?))
+        for i in 0..listenfd.len() {
+            let Ok(Some(listener)) = listenfd.take_tcp_listener(i) else {
+                continue;
+            };
+
+            listener.set_nonblocking(true)?;
+            return Ok(Some(TcpListener::from_std(listener)?));
+        }
+
+        eprintln!("--listenfd enabled, but no socket was passed by the system manager.");
+        Ok(None)
+    }
+
+    #[cfg(not(unix))]
+    fn inherit_socket(&self) -> Result<Option<TcpListener>> {
+        Ok(None)
     }
 }
 

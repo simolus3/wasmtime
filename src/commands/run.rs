@@ -1338,7 +1338,7 @@ impl RunCommand {
         if self.run.common.wasi.inherit_stderr.unwrap_or(true) {
             builder.inherit_stderr();
         }
-        self.run.configure_wasip2(false, &mut builder)?;
+        self.run.configure_wasip2(&mut builder)?;
         store.data_mut().wasip1_ctx = Some(builder.build_p1());
         Ok(())
     }

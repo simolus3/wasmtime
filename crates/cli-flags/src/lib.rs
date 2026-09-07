@@ -516,10 +516,6 @@ wasmtime_option_group! {
         pub config: Option<bool>,
         /// Enable support for WASI key-value imports (experimental)
         pub keyvalue: Option<bool>,
-        /// Inherit environment variables and file descriptors following the
-        /// systemd listen fd specification (UNIX only) (legacy wasip1
-        /// implementation only)
-        pub listenfd: Option<bool>,
         /// Grant access to the given TCP listen socket (experimental, legacy
         /// wasip1 implementation only)
         #[serde(default)]

@@ -94,7 +94,6 @@ termcolor = { workspace = true, optional = true }
 gimli = { workspace = true, optional = true }
 pulley-interpreter = { workspace = true, optional = true }
 smallvec = { workspace = true }
-listenfd = { workspace = true, optional = true }
 
 async-trait = { workspace = true }
 bytes = { workspace = true }
@@ -107,6 +106,7 @@ pin-project-lite = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["mm", "process"] }
+listenfd = { workspace = true, optional = true }
 
 [dev-dependencies]
 env_logger = { workspace = true }

@@ -311,11 +311,7 @@ impl RunCommon {
         })
     }
 
-    pub fn configure_wasip2(
-        &self,
-        supports_listenfd: bool,
-        builder: &mut WasiCtxBuilder,
-    ) -> Result<()> {
+    pub fn configure_wasip2(&self, builder: &mut WasiCtxBuilder) -> Result<()> {
         // It's ok to block the current thread since we're the only thread in
         // the program as the CLI. This helps improve the performance of some
         // blocking operations in WASI, for example, by skipping the
@@ -360,9 +356,6 @@ impl RunCommon {
             builder.initial_cwd(cwd);
         }
 
-        if self.common.wasi.listenfd == Some(true) && !supports_listenfd {
-            bail!("components do not support --listenfd");
-        }
         for _ in self.compute_preopen_sockets()? {
             bail!("components do not support --tcplisten");
         }
