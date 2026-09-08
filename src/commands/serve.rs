@@ -1,4 +1,3 @@
-use crate::InheritedFileDescriptor;
 use crate::common::{HttpHooks, Profile, RunCommon, RunTarget};
 use clap::Parser;
 use http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode};
@@ -177,7 +176,7 @@ pub struct ServeCommand {
 
 impl ServeCommand {
     /// Start a server to run the given wasi-http proxy component
-    pub fn execute(mut self, fds: Vec<InheritedFileDescriptor>) -> Result<()> {
+    pub fn execute(mut self) -> Result<()> {
         self.run.common.init_logging()?;
 
         // We force cli errors before starting to listen for connections so then
@@ -208,7 +207,7 @@ impl ServeCommand {
             .enable_io()
             .build()?;
 
-        runtime.block_on(self.serve(fds))?;
+        runtime.block_on(self.serve())?;
 
         Ok(())
     }
@@ -317,7 +316,6 @@ impl ServeCommand {
     async fn serve_under_debugger(
         self,
         mut debug_run: RunCommand,
-        fds: Vec<InheritedFileDescriptor>,
         linker: Linker<Host>,
         component: Component,
     ) -> Result<()> {
@@ -353,7 +351,7 @@ impl ServeCommand {
                 &debug_component,
                 &mut debug_linker,
                 debuggee_store,
-                move |store| Box::pin(self.serve_maybe_debug(linker, fds, component, Some(store))),
+                move |store| Box::pin(self.serve_maybe_debug(linker, component, Some(store))),
             )
             .await
     }
@@ -538,7 +536,7 @@ impl ServeCommand {
         Ok(())
     }
 
-    async fn serve(mut self, fds: Vec<InheritedFileDescriptor>) -> Result<()> {
+    async fn serve(mut self) -> Result<()> {
         #[cfg(feature = "debug")]
         let debug_run = self.debugger_setup()?;
 
@@ -575,17 +573,16 @@ impl ServeCommand {
         #[cfg(feature = "debug")]
         if let Some(debug_run) = debug_run {
             return self
-                .serve_under_debugger(debug_run, fds, linker, component)
+                .serve_under_debugger(debug_run, linker, component)
                 .await;
         }
 
-        self.serve_maybe_debug(linker, fds, component, None).await
+        self.serve_maybe_debug(linker, component, None).await
     }
 
     async fn serve_maybe_debug(
         self,
         linker: Linker<Host>,
-        fds: Vec<InheritedFileDescriptor>,
         component: Component,
         mut debuggee_store: Option<&mut Store<Host>>,
     ) -> Result<()> {
@@ -624,23 +621,18 @@ impl ServeCommand {
             });
         }
 
-        if self.listenfd && cfg!(not(unix)) {
-            bail!("The --listenfd option is not available on Windows")
-        }
-
-        let inherited_socket = {
-            fds.into_iter().find_map(|fd| match fd {
-                crate::InheritedFileDescriptor::TcpSocket(listener) => Some(listener),
-                _ => None,
-            })
+        let inherited_socket = if self.listenfd {
+            Self::inherit_socket().with_context(|| "Resolve inherited socket")?
+        } else {
+            None
         };
+
         let listener = match inherited_socket {
             Some(listener) => {
                 eprintln!("Serving HTTP on inherited socket");
                 log::info!("Listening on inherited socket");
 
-                listener.set_nonblocking(true)?;
-                TcpListener::from_std(listener)?
+                listener
             }
             None => {
                 let socket = match &self.addr {
@@ -782,6 +774,28 @@ impl ServeCommand {
         }
 
         Ok(())
+    }
+
+    #[cfg(unix)]
+    fn inherit_socket() -> Result<Option<TcpListener>> {
+        use crate::inherited_fd::{InheritedFileDescriptor, take_inherited_fds};
+
+        let sockets = take_inherited_fds();
+        let Some(inherited_socket) = ({
+            sockets.into_iter().find_map(|fd| match fd {
+                InheritedFileDescriptor::TcpSocket(listener) => Some(listener),
+            })
+        }) else {
+            return Ok(None);
+        };
+
+        inherited_socket.set_nonblocking(true)?;
+        Ok(Some(TcpListener::from_std(inherited_socket)?))
+    }
+
+    #[cfg(not(unix))]
+    fn inherit_socket() -> Result<Option<TcpListener>> {
+        bail!("The --listenfd option is not available on Windows")
     }
 }
 

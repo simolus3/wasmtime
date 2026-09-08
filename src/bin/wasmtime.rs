@@ -5,7 +5,6 @@
 
 use clap::Parser;
 use wasmtime::Result;
-use wasmtime_cli::{InheritedFileDescriptor, inherit_file_descriptors};
 
 /// Wasmtime WebAssembly Runtime
 #[derive(Parser)]
@@ -101,7 +100,7 @@ enum Subcommand {
 
 impl Wasmtime {
     /// Executes the command.
-    pub fn execute(self, fds: Vec<InheritedFileDescriptor>) -> Result<()> {
+    pub fn execute(self) -> Result<()> {
         #[cfg(feature = "run")]
         let subcommand = self.subcommand.unwrap_or(Subcommand::Run(self.run));
         #[cfg(not(feature = "run"))]
@@ -121,7 +120,7 @@ impl Wasmtime {
             Subcommand::Explore(c) => c.execute(),
 
             #[cfg(feature = "serve")]
-            Subcommand::Serve(c) => c.execute(fds),
+            Subcommand::Serve(c) => c.execute(),
 
             #[cfg(feature = "cranelift")]
             Subcommand::Settings(c) => c.execute(),
@@ -177,13 +176,21 @@ impl CompletionCommand {
 
 #[allow(unreachable_code, reason = "empty enum with all features disabled")]
 fn main() -> Result<()> {
-    let fds = unsafe {
-        // Safety: This is called first in main
-        inherit_file_descriptors()
-    };
+    setup();
 
-    return Wasmtime::parse().execute(fds);
+    return Wasmtime::parse().execute();
 }
+
+#[cfg(all(unix, feature = "serve"))]
+fn setup() {
+    unsafe {
+        // Safety: This is called first in main
+        wasmtime_cli::init_inherited_fds()
+    }
+}
+
+#[cfg(not(all(unix, feature = "serve")))]
+fn setup() {}
 
 #[test]
 fn verify_cli() {
