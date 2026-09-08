@@ -5,6 +5,7 @@
 
 use clap::Parser;
 use wasmtime::Result;
+use wasmtime_cli::{InheritedFileDescriptor, inherit_file_descriptors};
 
 /// Wasmtime WebAssembly Runtime
 #[derive(Parser)]
@@ -100,7 +101,7 @@ enum Subcommand {
 
 impl Wasmtime {
     /// Executes the command.
-    pub fn execute(self) -> Result<()> {
+    pub fn execute(self, fds: Vec<InheritedFileDescriptor>) -> Result<()> {
         #[cfg(feature = "run")]
         let subcommand = self.subcommand.unwrap_or(Subcommand::Run(self.run));
         #[cfg(not(feature = "run"))]
@@ -120,7 +121,7 @@ impl Wasmtime {
             Subcommand::Explore(c) => c.execute(),
 
             #[cfg(feature = "serve")]
-            Subcommand::Serve(c) => c.execute(),
+            Subcommand::Serve(c) => c.execute(fds),
 
             #[cfg(feature = "cranelift")]
             Subcommand::Settings(c) => c.execute(),
@@ -176,7 +177,12 @@ impl CompletionCommand {
 
 #[allow(unreachable_code, reason = "empty enum with all features disabled")]
 fn main() -> Result<()> {
-    return Wasmtime::parse().execute();
+    let fds = unsafe {
+        // Safety: This is called first in main
+        inherit_file_descriptors()
+    };
+
+    return Wasmtime::parse().execute(fds);
 }
 
 #[test]

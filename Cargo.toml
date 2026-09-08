@@ -106,7 +106,7 @@ pin-project-lite = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["mm", "process"] }
-listenfd = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
 
 [dev-dependencies]
 env_logger = { workspace = true }
@@ -473,7 +473,6 @@ pin-project-lite = "0.2.14"
 sha2 = { version = "0.10.2", default-features = false }
 gdbstub = "0.7.10"
 gdbstub_arch = "0.3.3"
-listenfd = "1"
 
 # =============================================================================
 #
@@ -619,7 +618,7 @@ serve = [
   "dep:http-body-util",
   "dep:http",
   "dep:pin-project-lite",
-  "dep:listenfd",
+  "dep:libc",
   "wasmtime-cli-flags/async",
   "wasmtime-wasi-http?/p2",
 ]

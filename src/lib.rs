@@ -11,3 +11,7 @@ pub(crate) mod common;
 
 #[cfg(any(feature = "objdump", all(feature = "hot-blocks", target_os = "linux")))]
 pub(crate) mod disas;
+
+mod inherited_fd;
+
+pub use inherited_fd::{InheritedFileDescriptor, inherit_file_descriptors};
