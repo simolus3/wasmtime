@@ -1439,10 +1439,10 @@ mod test_programs {
             let mut cmd = super::get_wasmtime_command()?;
             cmd.arg("serve").arg("--addr=127.0.0.1:0").arg(wasm);
             configure(&mut cmd);
-            Self::spawn(&mut cmd)
+            Self::spawn(&mut cmd, None)
         }
 
-        fn spawn(cmd: &mut Command) -> Result<WasmtimeServe> {
+        fn spawn(cmd: &mut Command, inherited_addr: Option<SocketAddr>) -> Result<WasmtimeServe> {
             cmd.arg("--shutdown-addr=127.0.0.1:0");
             cmd.stdin(Stdio::null());
             cmd.stdout(Stdio::piped());
@@ -1475,7 +1475,10 @@ mod test_programs {
                 }
             };
             let shutdown_addr = read_addr_from_line("Listening for shutdown");
-            let addr = read_addr_from_line("Serving HTTP on");
+            let addr = match inherited_addr {
+                Some(addr) => Ok(addr),
+                None => read_addr_from_line("Serving HTTP on"),
+            };
             let (shutdown_addr, addr) = match (shutdown_addr, addr) {
                 (Ok(a), Ok(b)) => (a, b),
                 // If either failed kill the child and otherwise try to shepherd
@@ -1803,6 +1806,7 @@ mod test_programs {
                 .arg("-Scli")
                 .arg(format!("--addr={}", server.addr))
                 .arg(wasm),
+            None,
         )
         .err()
         .expect("server spawn should have failed but it succeeded");
@@ -1860,6 +1864,7 @@ mod test_programs {
                 .arg("-Scli")
                 .arg(format!("--addr={addr}"))
                 .arg(wasm),
+            None,
         )?;
 
         Ok(())
@@ -2543,6 +2548,57 @@ start a print 1234
             },
         )
         .await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn serve_inherit() -> Result<()> {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        use std::os::unix::process::CommandExt;
+        use tokio::net::TcpListener;
+
+        let socket = TcpListener::bind("localhost:0").await?;
+        let addr = socket.local_addr()?;
+
+        // Using a shell script as a launcher since that uses exec, allowing us to provide the
+        // LISTEN_PID variable.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg(r#"export LISTEN_FDS=1 LISTEN_PID=$$; exec "$@""#)
+            .arg("sh")
+            .arg(super::get_wasmtime_path())
+            .arg("serve")
+            .arg("-Scli")
+            .arg("--listenfd")
+            .arg(P2_CLI_SERVE_HELLO_WORLD_COMPONENT)
+            .env("WASMTIME_CODEGEN_CACHE", "n");
+        unsafe {
+            cmd.pre_exec(move || {
+                let mut target = OwnedFd::from_raw_fd(3);
+                rustix::io::dup2(&socket, &mut target)?;
+                std::mem::forget(target);
+                Ok(())
+            });
+        }
+
+        let server = WasmtimeServe::spawn(&mut cmd, Some(addr))?;
+
+        let (mut send, conn_task) = server.start_requests().await?;
+        let result = WasmtimeServe::send_request_with(
+            &mut send,
+            hyper::Request::builder()
+                .uri("http://localhost/")
+                .body(String::new())
+                .context("failed to make request")?,
+        )
+        .await?;
+
+        assert!(result.status().is_success());
+        assert_eq!(result.body(), "Hello, WASI!");
+        drop(send);
+        conn_task.await??;
+
+        Ok(())
     }
 
     async fn cli_serve_hello_world(

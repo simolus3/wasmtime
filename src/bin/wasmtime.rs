@@ -176,21 +176,8 @@ impl CompletionCommand {
 
 #[allow(unreachable_code, reason = "empty enum with all features disabled")]
 fn main() -> Result<()> {
-    setup();
-
     return Wasmtime::parse().execute();
 }
-
-#[cfg(all(unix, feature = "serve"))]
-fn setup() {
-    unsafe {
-        // Safety: This is called first in main
-        wasmtime_cli::init_inherited_fds()
-    }
-}
-
-#[cfg(not(all(unix, feature = "serve")))]
-fn setup() {}
 
 #[test]
 fn verify_cli() {

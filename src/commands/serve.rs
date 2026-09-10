@@ -7,6 +7,7 @@ use pin_project_lite::pin_project;
 use std::convert::Infallible;
 use std::ffi::OsString;
 use std::net::SocketAddr;
+use std::net::TcpListener as StdTcpListener;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::{
@@ -177,6 +178,12 @@ pub struct ServeCommand {
 impl ServeCommand {
     /// Start a server to run the given wasi-http proxy component
     pub fn execute(mut self) -> Result<()> {
+        let inherited_socket = if self.listenfd {
+            Self::inherit_socket().with_context(|| "Failed to resolve inherited sockets")?
+        } else {
+            None
+        };
+
         self.run.common.init_logging()?;
 
         // We force cli errors before starting to listen for connections so then
@@ -207,7 +214,7 @@ impl ServeCommand {
             .enable_io()
             .build()?;
 
-        runtime.block_on(self.serve())?;
+        runtime.block_on(self.serve(inherited_socket))?;
 
         Ok(())
     }
@@ -318,6 +325,7 @@ impl ServeCommand {
         mut debug_run: RunCommand,
         linker: Linker<Host>,
         component: Component,
+        inherited_socket: Option<StdTcpListener>,
     ) -> Result<()> {
         let mut debuggee_store = self.new_store(linker.engine(), None)?;
 
@@ -351,7 +359,14 @@ impl ServeCommand {
                 &debug_component,
                 &mut debug_linker,
                 debuggee_store,
-                move |store| Box::pin(self.serve_maybe_debug(linker, component, Some(store))),
+                move |store| {
+                    Box::pin(self.serve_maybe_debug(
+                        linker,
+                        component,
+                        Some(store),
+                        inherited_socket,
+                    ))
+                },
             )
             .await
     }
@@ -536,7 +551,7 @@ impl ServeCommand {
         Ok(())
     }
 
-    async fn serve(mut self) -> Result<()> {
+    async fn serve(mut self, inherited_socket: Option<StdTcpListener>) -> Result<()> {
         #[cfg(feature = "debug")]
         let debug_run = self.debugger_setup()?;
 
@@ -573,11 +588,12 @@ impl ServeCommand {
         #[cfg(feature = "debug")]
         if let Some(debug_run) = debug_run {
             return self
-                .serve_under_debugger(debug_run, linker, component)
+                .serve_under_debugger(debug_run, linker, component, inherited_socket)
                 .await;
         }
 
-        self.serve_maybe_debug(linker, component, None).await
+        self.serve_maybe_debug(linker, component, None, inherited_socket)
+            .await
     }
 
     async fn serve_maybe_debug(
@@ -585,6 +601,7 @@ impl ServeCommand {
         linker: Linker<Host>,
         component: Component,
         mut debuggee_store: Option<&mut Store<Host>>,
+        inherited_socket: Option<StdTcpListener>,
     ) -> Result<()> {
         let engine = linker.engine();
         let request_headers = RequestHeaders::parse(&self.headers)?;
@@ -621,18 +638,12 @@ impl ServeCommand {
             });
         }
 
-        let inherited_socket = if self.listenfd {
-            Self::inherit_socket().with_context(|| "Resolve inherited socket")?
-        } else {
-            None
-        };
-
         let listener = match inherited_socket {
             Some(listener) => {
                 eprintln!("Serving HTTP on inherited socket");
                 log::info!("Listening on inherited socket");
 
-                listener
+                TcpListener::from_std(listener)?
             }
             None => {
                 let socket = match &self.addr {
@@ -776,25 +787,76 @@ impl ServeCommand {
         Ok(())
     }
 
+    /// Takes ownership of file descriptors this process has inherited from a parent process like a
+    /// service manager.
+    ///
+    /// These are looked up with the [protocol from systemd](https://www.freedesktop.org/software/systemd/man/latest/sd_listen_fds.html#Notes).
+    /// This is used to implement socket activation for `wasmtime serve`.
     #[cfg(unix)]
-    fn inherit_socket() -> Result<Option<TcpListener>> {
-        use crate::inherited_fd::{InheritedFileDescriptor, take_inherited_fds};
+    fn inherit_socket() -> Result<Option<StdTcpListener>> {
+        use rustix::fs::{FileType, fstat};
+        use rustix::net::{AddressFamily, SocketType, getsockname, sockopt::socket_type};
+        use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+        use std::{env, process};
 
-        let sockets = take_inherited_fds();
-        let Some(inherited_socket) = ({
-            sockets.into_iter().find_map(|fd| match fd {
-                InheritedFileDescriptor::TcpSocket(listener) => Some(listener),
-            })
-        }) else {
+        // The logic here is taken from https://github.com/systemd/systemd/blob/main/src/libsystemd/sd-daemon/sd-daemon.c.
+        if !env::var("LISTEN_PID")
+            .ok()
+            .and_then(|pid| pid.parse().ok())
+            .is_some_and(|pid: u32| pid == process::id())
+        {
+            // Not meant for this process, ignore.
+            return Ok(None);
+        }
+
+        let Some(num_fds) = env::var("LISTEN_FDS").ok().and_then(|fds| fds.parse().ok()) else {
             return Ok(None);
         };
 
-        inherited_socket.set_nonblocking(true)?;
-        Ok(Some(TcpListener::from_std(inherited_socket)?))
+        let first_fd: RawFd = 3;
+        let Some(last_fd) = first_fd.checked_add(num_fds) else {
+            return Ok(None);
+        };
+
+        let mut first_tcp_socket = None;
+        // We want to take ownership of all file descriptors here, but only use the first socket to
+        // listen on it.
+        for fd in first_fd..last_fd {
+            let fd = unsafe {
+                // Safety: We're calling this first in Self::execute(), before any other file
+                // descriptors part from stdin, stdout and stderr are opened.
+                OwnedFd::from_raw_fd(fd)
+            };
+
+            #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
+            rustix::io::ioctl_fioclex(&fd)?;
+
+            if first_tcp_socket.is_none() {
+                let stat = fstat(&fd)?;
+                if !FileType::from_raw_mode(stat.st_mode).is_socket() {
+                    continue;
+                }
+
+                let address_family = getsockname(&fd)?.address_family();
+                if address_family != AddressFamily::INET && address_family != AddressFamily::INET6 {
+                    continue;
+                }
+
+                if socket_type(&fd)? != SocketType::STREAM {
+                    continue;
+                }
+
+                let listener = StdTcpListener::from(fd);
+                listener.set_nonblocking(true)?;
+                first_tcp_socket = Some(listener);
+            }
+        }
+
+        Ok(first_tcp_socket)
     }
 
     #[cfg(not(unix))]
-    fn inherit_socket() -> Result<Option<TcpListener>> {
+    fn inherit_socket() -> Result<Option<StdTcpListener>> {
         bail!("The --listenfd option is not available on Windows")
     }
 }
