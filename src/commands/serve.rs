@@ -837,6 +837,7 @@ impl ServeCommand {
                 OwnedFd::from_raw_fd(fd)
             };
 
+            // Set the close-on-exec flag, matching libsystemd.
             #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
             rustix::io::ioctl_fioclex(&fd)?;
 
