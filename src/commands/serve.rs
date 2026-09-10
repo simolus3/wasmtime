@@ -179,7 +179,11 @@ impl ServeCommand {
     /// Start a server to run the given wasi-http proxy component
     pub fn execute(mut self) -> Result<()> {
         let inherited_socket = if self.listenfd {
-            Self::inherit_socket().with_context(|| "Failed to resolve inherited sockets")?
+            unsafe {
+                // Safety: Called early before any other file descriptors are opened.
+                Self::inherit_socket()
+            }
+            .with_context(|| "Failed to resolve inherited sockets")?
         } else {
             None
         };
@@ -792,8 +796,13 @@ impl ServeCommand {
     ///
     /// These are looked up with the [protocol from systemd](https://www.freedesktop.org/software/systemd/man/latest/sd_listen_fds.html#Notes).
     /// This is used to implement socket activation for `wasmtime serve`.
+    ///
+    /// ## Safety
+    ///
+    /// This function takes ownership of raw file descriptors and must be called before any other
+    /// file descriptors are opened.
     #[cfg(unix)]
-    fn inherit_socket() -> Result<Option<StdTcpListener>> {
+    unsafe fn inherit_socket() -> Result<Option<StdTcpListener>> {
         use rustix::fs::{FileType, fstat};
         use rustix::net::{AddressFamily, SocketType, getsockname, sockopt::socket_type};
         use std::os::fd::{FromRawFd, OwnedFd, RawFd};
@@ -856,7 +865,7 @@ impl ServeCommand {
     }
 
     #[cfg(not(unix))]
-    fn inherit_socket() -> Result<Option<StdTcpListener>> {
+    unsafe fn inherit_socket() -> Result<Option<StdTcpListener>> {
         bail!("The --listenfd option is not available on Windows")
     }
 }
