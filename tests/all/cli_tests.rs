@@ -2598,6 +2598,9 @@ start a print 1234
         drop(send);
         conn_task.await??;
 
+        let (_, stderr) = server.finish()?;
+        assert!(stderr.contains("Serving HTTP on inherited socket"));
+
         Ok(())
     }
 
