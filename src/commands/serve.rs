@@ -98,10 +98,10 @@ impl wasmtime_wasi_http::WasiHttpView for Host {
     }
 }
 
-const DEFAULT_ADDR: std::net::SocketAddr = std::net::SocketAddr::new(
+const DEFAULT_ADDRS: &[std::net::SocketAddr] = &[std::net::SocketAddr::new(
     std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
     8080,
-);
+)];
 
 fn parse_duration(s: &str) -> Result<Duration, String> {
     Duration::parse(Some(s)).map_err(|e| e.to_string())
@@ -113,9 +113,9 @@ pub struct ServeCommand {
     #[command(flatten)]
     run: RunCommon,
 
-    /// Socket address for the web server to bind to.
-    #[arg(long , value_name = "SOCKADDR", default_value_t = DEFAULT_ADDR)]
-    addr: SocketAddr,
+    /// Socket addresses for the web server to bind to.
+    #[arg(long , value_name = "SOCKADDR", default_values_t = DEFAULT_ADDRS)]
+    addr: Vec<SocketAddr>,
 
     /// Socket address where, when connected to, will initiate a graceful
     /// shutdown.
@@ -650,38 +650,40 @@ impl ServeCommand {
             });
         }
 
-        let servers = match inherited_socket {
-            Some(listeners) => {
-                eprintln!("Serving HTTP on inherited socket");
-                log::info!("Listening on inherited socket");
+        let mut servers = vec![];
 
-                let mut servers = vec![];
+        match inherited_socket {
+            Some(listeners) => {
+                assert!(!listeners.is_empty());
                 for listener in listeners {
                     servers.push(listener.try_into()?);
                 }
 
-                servers
+                eprintln!("Serving HTTP on inherited socket");
+                log::info!("Listening on inherited socket");
             }
             None => {
-                let socket = match &self.addr {
-                    SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
-                    SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6()?,
-                };
-                // Conditionally enable `SO_REUSEADDR` depending on the current
-                // platform. On Unix we want this to be able to rebind an address in
-                // the `TIME_WAIT` state which can happen then a server is killed with
-                // active TCP connections and then restarted. On Windows though if
-                // `SO_REUSEADDR` is specified then it enables multiple applications to
-                // bind the port at the same time which is not something we want. Hence
-                // this is conditionally set based on the platform (and deviates from
-                // Tokio's default from always-on).
-                socket.set_reuseaddr(!cfg!(windows))?;
-                socket.bind(self.addr)?;
-                let listener = socket.listen(100)?;
+                for addr in &self.addr {
+                    let socket = match addr {
+                        SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
+                        SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6()?,
+                    };
+                    // Conditionally enable `SO_REUSEADDR` depending on the current
+                    // platform. On Unix we want this to be able to rebind an address in
+                    // the `TIME_WAIT` state which can happen then a server is killed with
+                    // active TCP connections and then restarted. On Windows though if
+                    // `SO_REUSEADDR` is specified then it enables multiple applications to
+                    // bind the port at the same time which is not something we want. Hence
+                    // this is conditionally set based on the platform (and deviates from
+                    // Tokio's default from always-on).
+                    socket.set_reuseaddr(!cfg!(windows))?;
+                    socket.bind(*addr)?;
+                    let listener = socket.listen(100)?;
 
-                eprintln!("Serving HTTP on http://{}/", listener.local_addr()?);
-                log::info!("Listening on {}", self.addr);
-                vec![SocketServer::Inet(listener)]
+                    eprintln!("Serving HTTP on http://{}/", listener.local_addr()?);
+                    log::info!("Listening on {}", addr);
+                    servers.push(SocketServer::Inet(listener));
+                }
             }
         };
 
