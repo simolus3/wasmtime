@@ -126,7 +126,7 @@ pub struct ServeCommand {
     /// Use sockets passed via the 'LISTEN_FDS' environment variable (set e.g. by systemd when
     /// launching a service from socket units). Not available on Windows.
     #[arg(long)]
-    listenfd: bool,
+    systemd_listenfd: bool,
 
     /// The WebAssembly component to run.
     #[arg(value_name = "WASM", required = true)]
@@ -178,12 +178,14 @@ pub struct ServeCommand {
 impl ServeCommand {
     /// Start a server to run the given wasi-http proxy component
     pub fn execute(mut self) -> Result<()> {
-        let inherited_socket = if self.listenfd {
-            unsafe {
-                // Safety: Called early before any other file descriptors are opened.
-                Self::inherit_socket()
-            }
-            .with_context(|| "Failed to resolve inherited sockets")?
+        let inherited_socket = if self.systemd_listenfd {
+            Some(
+                unsafe {
+                    // Safety: Called early before any other file descriptors are opened.
+                    Self::inherit_socket()
+                }
+                .with_context(|| "Failed to resolve inherited sockets")?,
+            )
         } else {
             None
         };
@@ -802,11 +804,12 @@ impl ServeCommand {
     /// This function takes ownership of raw file descriptors and must be called before any other
     /// file descriptors are opened.
     #[cfg(unix)]
-    unsafe fn inherit_socket() -> Result<Option<StdTcpListener>> {
+    unsafe fn inherit_socket() -> Result<StdTcpListener> {
         use rustix::fs::{FileType, fstat};
         use rustix::net::{AddressFamily, SocketType, getsockname, sockopt::socket_type};
         use std::os::fd::{FromRawFd, OwnedFd, RawFd};
         use std::{env, process};
+        use wasmtime::format_err;
 
         // The logic here is taken from https://github.com/systemd/systemd/blob/main/src/libsystemd/sd-daemon/sd-daemon.c.
         if !env::var("LISTEN_PID")
@@ -814,17 +817,20 @@ impl ServeCommand {
             .and_then(|pid| pid.parse().ok())
             .is_some_and(|pid: u32| pid == process::id())
         {
-            // Not meant for this process, ignore.
-            return Ok(None);
+            bail!("Missing or mismatched LISTEN_PID environment variable");
         }
 
-        let Some(num_fds) = env::var("LISTEN_FDS").ok().and_then(|fds| fds.parse().ok()) else {
-            return Ok(None);
+        let Some(num_fds) = env::var("LISTEN_FDS")
+            .ok()
+            .and_then(|fds| fds.parse().ok())
+            .take_if(|e| *e >= 1)
+        else {
+            bail!("Missing or invalid LISTEN_FDS environment variable");
         };
 
         let first_fd: RawFd = 3;
         let Some(last_fd) = first_fd.checked_add(num_fds) else {
-            return Ok(None);
+            bail!("Invalid amount of file descriptors in LISTEN_FDS");
         };
 
         let mut first_tcp_socket = None;
@@ -841,32 +847,35 @@ impl ServeCommand {
             #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
             rustix::io::ioctl_fioclex(&fd)?;
 
-            if first_tcp_socket.is_none() {
-                let stat = fstat(&fd)?;
-                if !FileType::from_raw_mode(stat.st_mode).is_socket() {
-                    continue;
-                }
-
-                let address_family = getsockname(&fd)?.address_family();
-                if address_family != AddressFamily::INET && address_family != AddressFamily::INET6 {
-                    continue;
-                }
-
-                if socket_type(&fd)? != SocketType::STREAM {
-                    continue;
-                }
-
-                let listener = StdTcpListener::from(fd);
-                listener.set_nonblocking(true)?;
-                first_tcp_socket = Some(listener);
+            // Check if this file descriptor is a TCP socket.
+            let stat = fstat(&fd)?;
+            if !FileType::from_raw_mode(stat.st_mode).is_socket() {
+                continue;
             }
+
+            let address_family = getsockname(&fd)?.address_family();
+            if address_family != AddressFamily::INET && address_family != AddressFamily::INET6 {
+                continue;
+            }
+
+            if socket_type(&fd)? != SocketType::STREAM {
+                continue;
+            }
+
+            if !first_tcp_socket.is_none() {
+                bail!("Inherited multiple TCP sockets, which is unsupported.")
+            }
+
+            let listener = StdTcpListener::from(fd);
+            listener.set_nonblocking(true)?;
+            first_tcp_socket = Some(listener);
         }
 
-        Ok(first_tcp_socket)
+        first_tcp_socket.ok_or_else(|| format_err!("No TCP socket inherited"))
     }
 
     #[cfg(not(unix))]
-    unsafe fn inherit_socket() -> Result<Option<StdTcpListener>> {
+    unsafe fn inherit_socket() -> Result<StdTcpListener> {
         bail!("The --listenfd option is not available on Windows")
     }
 }

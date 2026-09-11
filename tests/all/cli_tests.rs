@@ -2569,7 +2569,7 @@ start a print 1234
             .arg(super::get_wasmtime_path())
             .arg("serve")
             .arg("-Scli")
-            .arg("--listenfd")
+            .arg("--systemd-listenfd")
             .arg(P2_CLI_SERVE_HELLO_WORLD_COMPONENT)
             .env("WASMTIME_CODEGEN_CACHE", "n");
         unsafe {
@@ -2582,21 +2582,17 @@ start a print 1234
         }
 
         let server = WasmtimeServe::spawn(&mut cmd, Some(addr))?;
+        let resp = server
+            .send_request(
+                hyper::Request::builder()
+                    .uri("http://localhost/")
+                    .body(String::new())
+                    .context("failed to make request")?,
+            )
+            .await?;
 
-        let (mut send, conn_task) = server.start_requests().await?;
-        let result = WasmtimeServe::send_request_with(
-            &mut send,
-            hyper::Request::builder()
-                .uri("http://localhost/")
-                .body(String::new())
-                .context("failed to make request")?,
-        )
-        .await?;
-
-        assert!(result.status().is_success());
-        assert_eq!(result.body(), "Hello, WASI!");
-        drop(send);
-        conn_task.await??;
+        assert!(resp.status().is_success());
+        assert_eq!(resp.body(), "Hello, WASI!");
 
         let (_, stderr) = server.finish()?;
         assert!(stderr.contains("Serving HTTP on inherited socket"));
