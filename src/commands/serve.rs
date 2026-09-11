@@ -20,10 +20,8 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::io::AsyncRead;
-use tokio::io::{self, AsyncWrite};
-use tokio::net::TcpListener;
-use tokio::net::TcpStream;
+use tokio::io::{self, AsyncRead, AsyncWrite};
+use tokio::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, Semaphore};
@@ -681,7 +679,7 @@ impl ServeCommand {
                     let listener = socket.listen(100)?;
 
                     eprintln!("Serving HTTP on http://{}/", listener.local_addr()?);
-                    log::info!("Listening on {}", addr);
+                    log::info!("Listening on {addr}");
                     servers.push(SocketServer::Inet(listener));
                 }
             }
