@@ -2557,6 +2557,12 @@ start a print 1234
         use std::os::unix::process::CommandExt;
         use tokio::net::TcpListener;
 
+        // We can't easily inherit file descriptors to emulators like QEMU, so skip this test for
+        // cross-compiled setups.
+        if wasmtime_test_util::cargo_test_runner().is_some() {
+            return Ok(());
+        }
+
         let socket = TcpListener::bind("localhost:0").await?;
         let addr = socket.local_addr()?;
 
